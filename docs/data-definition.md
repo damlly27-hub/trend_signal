@@ -205,3 +205,27 @@ target_day7_view_growth = log1p(total_views_day7) - log1p(total_views_day3)
 - Day 1~3 중 required provider coverage가 기준 미만이면 prediction 대상에서 제외하거나 낮은 신뢰도로 표시한다.
 - aggregate는 source snapshot까지 역추적 가능해야 한다.
 - fixture는 실제 provider namespace와 충돌하지 않는 ID prefix/전용 dataset을 사용한다.
+
+## 11. Phase 1-A 물리 schema 범위
+
+장기 논리 계약의 모든 필드를 최초 migration에 선반영하지 않는다. Phase 1-A의 물리 `trends` table은 `id`, `name`, `category`, `description`, `status`, `created_at`, `updated_at`만 포함한다. `slug`, `locale`, 관측 시작 정보는 해당 use case가 구현될 때 별도 migration으로 추가한다.
+
+물리 `trend_aliases` table은 `id`, `trend_id`, `alias`, `normalized_alias`, `created_at`을 포함한다. provider/language/primary/active 필드는 provider별 alias 정책이 확정되는 후속 단계로 미룬다. `normalized_alias`는 API에 노출하지 않는 중복 방지용 내부 값이다.
+
+이 단계의 `status`는 catalog lifecycle인 `ACTIVE`, `PAUSED`, `ARCHIVED`이며, ML 결과 label인 `RISING`, `STABLE`, `FADING`과 다른 개념이다.
+
+## 12. Phase 1-B 물리 schema 범위
+
+`collection_runs`는 `id`, `trend_id`, `provider`, `requested_at`, `collected_at`, `status`, `error_summary`, `is_fixture`, `created_at`을 저장한다. 각 `observations.collection_run_id`가 이 실행을 참조하여 lineage를 보존한다.
+
+`observations`는 수집 시점의 provider-neutral 원시 관측값이다. `trend_id`, `source`, `collected_at`, count/ratio 값, `is_fixture`, `created_at`을 저장하며 동일 Trend의 반복 수집은 별도 행으로 append한다. 값이 제공되지 않으면 0 대신 `NULL`이다. Fixture 실행은 `source=FIXTURE`, `is_fixture=true`로 실제 데이터와 구분한다.
+
+이 raw observation은 향후 UTC 날짜별 규칙으로 계산할 `trend_daily_observations`와 다르다. 일 집계는 raw 행을 덮어쓰거나 대체하지 않으며, 집계 version과 source lineage를 별도로 가져야 한다.
+
+## 13. Phase 1-C NAVER Search Trend 물리 schema
+
+`collection_runs`에 nullable `request_start_date`, `request_end_date`, `time_unit`, `group_name`, `keywords`를 추가한다. Fixture와 향후 다른 provider run에는 필요하지 않을 수 있으므로 nullable이며, NAVER Search Trend 성공 run에서는 모두 채운다. 인증 정보는 저장하지 않는다.
+
+`search_trend_observations`는 `id`, `trend_id`, `collection_run_id`, `provider`, `period`, `ratio numeric(10,5)`, `collected_at`, `is_fixture`, `created_at`을 가진다. `(collection_run_id, period)`만 unique이므로 같은 period라도 서로 다른 collection run이면 별도 행으로 append된다.
+
+NAVER ratio는 실제 검색 횟수가 아니다. 한 응답의 구간별 결과 중 최대값을 100으로 정규화한 상대 관심도이며 request window와 keyword group이 바뀌면 동일 period의 ratio도 달라질 수 있다. 따라서 서로 다른 run의 ratio를 절대 검색량처럼 직접 비교하지 않고, 비교 가능한 window/group인지 lineage를 먼저 확인한다. 이 원시 period 관측은 향후 daily metric이나 ML feature가 아니며 파생 단계에서 별도 version과 lineage를 가져야 한다.

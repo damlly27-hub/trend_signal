@@ -160,6 +160,31 @@ Phase 0에서는 이 전체를 빈 파일로 미리 만들지 않는다. 각 Pha
 
 ## 9. 배포 단위와 확장
 
-초기 Docker Compose 구성은 `api`, `scheduler`, `postgres`, 이후 `frontend`를 독립 service로 둘 수 있다. Phase 0의 빈 `docker-compose.yml`은 실행 구성을 가장하지 않기 위해 구현하지 않는다. Phase 1에서 DB와 API가 실제 health check를 통과하는 최소 구성부터 추가한다.
+초기 Docker Compose 구성은 Phase 1-A에서 `api`와 `postgres`만 제공한다. 두 service는 health check를 가지며 API 시작 전에 migration을 적용한다. `scheduler`와 `frontend`는 각 구현 Phase에서 독립 service로 추가한다.
 
 추가 provider는 collector 계약과 normalized record를 구현하고, schema 변화가 필요한 경우 migration 및 집계 contract test를 함께 제공한다.
+
+## 10. Phase 1-A 구현 결정
+
+Trend catalog의 첫 수직 슬라이스는 Router → Schema → Service → Repository → ORM → Database Session 책임을 분리한다. Provider와 pipeline 의존성은 두지 않는다.
+
+- `trends.name`은 database unique constraint로 중복을 막는다.
+- alias는 Unicode NFKC, case folding, 연속 공백 축약 후 `(trend_id, normalized_alias)` unique constraint로 중복을 막는다.
+- Trend 삭제 API는 제공하지 않는다. Alias FK는 `ON DELETE RESTRICT`로 두어 향후 연구 데이터가 연결된 Trend의 우발적 hard delete를 허용하지 않는다.
+- API 테스트는 production URL을 사용하지 않고 test별 임시 SQLite database를 생성한다.
+
+## 11. Phase 1-B 구현 결정
+
+`CollectionRequest`와 `CollectionResult`는 provider adapter 밖의 내부 계약이며 `Collector` Protocol은 `collect(request) -> result`만 요구한다. Alias별 오류 목록과 `PARTIAL` 상태로 부분 실패를 표현하므로 향후 YouTube나 NAVER adapter가 같은 계약을 구현할 수 있다.
+
+개발용 `FixtureCollector`는 외부 통신 없이 고정 값을 반환한다. 각 실행은 `collection_runs` 한 행과 `observations` 한 행을 새로 추가하며 기존 관측을 갱신하지 않는다. `observations`는 수집 당시의 provider-neutral 원시 관측 스냅샷이고, 향후 `trend_daily_observations`는 여러 원시 관측을 UTC 날짜 단위로 계산한 파생 데이터다.
+
+Phase 1-A schema에는 alias 활성 필드가 없으므로 현재는 등록 alias 전체를 request에 포함한다. Provider별/활성 alias 정책은 해당 물리 필드가 추가되는 후속 migration에서 적용한다.
+
+## 12. Phase 1-C NAVER Search Trend 결정
+
+`NaverSearchTrendCollector`는 기존 `Collector`의 request/result 계약을 재사용하며 HTTP client를 주입할 수 있다. 기본 endpoint는 NAVER API HUB의 `/search-trend/v1/search`이고 timeout을 명시한다. Credential은 collector 사용 시점에만 검사하므로 credential이 없는 환경에서도 API 애플리케이션 자체는 시작된다.
+
+Trend 하나를 keyword group 하나로 변환한다. canonical Trend name과 등록 alias를 순서 보존 방식으로 중복 제거하며, 공식 API 제한인 그룹당 20개를 넘으면 alias를 버리지 않고 validation error를 반환한다. 인증 헤더는 DB metadata, 오류 응답, 로그에 저장하지 않는다.
+
+한 호출이 여러 period를 반환하므로 Phase 1-B의 단일 generic `observations` 행에 배열이나 임의 집계를 넣지 않는다. 실행 window와 keyword metadata는 `collection_runs`에, 각 period/ratio는 `search_trend_observations`에 저장한다. `(collection_run_id, period)`는 고유하지만 다른 run의 동일 period는 허용하여 window 변화에 따른 ratio 차이를 보존한다. Raw response 전체는 provider 형식 변화와 불필요한 저장 중복을 피하기 위해 보존하지 않고 재현에 필요한 request window, time unit, group name, keywords와 수집 시각만 보존한다.

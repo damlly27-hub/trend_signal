@@ -1,0 +1,2 @@
+"""TrendSignal backend package."""
+
